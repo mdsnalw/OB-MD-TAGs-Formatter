@@ -4,7 +4,7 @@
 
 双击：自动识别 Windows 上最近使用的 Obsidian 窗口当前笔记，处理后显示汇总。
 命令行：python update_frontmatter_and_remove_blanklines.py "文件或文件夹路径"
-文件夹只处理当前层级的 .md 文件。修改前在原文件旁保存时间戳 .bak。
+文件夹只处理当前层级的 .md 文件。直接更新原文件，不生成 .bak 备份。
 依赖：PyYAML；图形界面还需要 Python 自带的 Tkinter。
 """
 
@@ -15,7 +15,6 @@ import stat
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -56,7 +55,6 @@ class ProcessingResult:
     added_aliases: int = 0
     added_tags: int = 0
     removed_blank_lines: int = 0
-    backup_path: Optional[Path] = None
     error: Optional[str] = None
 
 
@@ -261,31 +259,8 @@ def remove_blanklines(content: str) -> str:
     )
 
 
-def create_backup(path: Path, original: bytes) -> Path:
-    """独占创建备份，绝不覆盖已有备份；内容来自处理前读取的原始字节。"""
-    stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    candidate = path.with_name(f'{path.name}.{stamp}.bak')
-    # 微秒时间戳碰撞时递增编号。
-    number = 0
-    while True:
-        try:
-            stream = candidate.open('xb')
-            break
-        except FileExistsError:
-            number += 1
-            candidate = path.with_name(f'{path.name}.{stamp}.{number}.bak')
-    try:
-        with stream:
-            stream.write(original)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except Exception:
-        candidate.unlink(missing_ok=True)
-        raise
-    return candidate
-
-
 def atomic_write(path: Path, data: bytes, original: bytes) -> None:
+    """原子替换原文件；临时文件在成功或失败后清理，不保留备份副本。"""
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode='wb', dir=path.parent,
@@ -327,7 +302,6 @@ def process_file(file_path: Path) -> ProcessingResult:
             return result
         if path.read_bytes() != original:
             raise RuntimeError('文件在处理过程中被其他程序修改，已取消写回')
-        result.backup_path = create_backup(path, original)
         atomic_write(path, output, original)
         result.status = 'modified'
         result.added_aliases = added_aliases
@@ -362,7 +336,7 @@ def format_summary(results: List[ProcessingResult]) -> str:
         f'实际新增别名：{sum(r.added_aliases for r in results)} 个',
         f'实际新增标签：{sum(r.added_tags for r in results)} 个',
         f'删除空白行：{sum(r.removed_blank_lines for r in results)} 行',
-        '已修改文件的原始备份保存在各文件旁（时间戳 .bak）。',
+        '已直接更新原 Markdown 文件，不生成备份副本。',
     ]
     for result in results:
         if result.error:
@@ -514,8 +488,6 @@ def main(argv=None) -> int:
         results = process_path(path)
         for result in results:
             print(f'{result.status}: {result.path}')
-            if result.backup_path:
-                print(f'  备份：{result.backup_path}')
         summary = format_summary(results)
         if not arguments:
             summary = f'当前文章：{path}\n\n' + summary

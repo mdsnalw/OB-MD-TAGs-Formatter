@@ -44,7 +44,7 @@ class MarkdownToolTests(unittest.TestCase):
     def test_script_exists(self):
         self.assertTrue(SCRIPT.is_file(), '缺少已规划的独立合并脚本')
 
-    def test_pipeline_backup_counts_and_idempotence(self):
+    def test_pipeline_updates_original_without_extra_files_and_is_idempotent(self):
         original = ('---\ntitle: 原标题\naliases: [旧名]\ntags: 旧标签\n'
                     'enabled: true\ncount: 3\nextra: {a: [1, 2]}\n---\n'
                     '# 正文\n\n内容\n\n#### 文章别名：\n- 旧名\n- 新名\n- 新名\n'
@@ -63,10 +63,10 @@ class MarkdownToolTests(unittest.TestCase):
         self.assertNotIn('文章别名', text)
         self.assertNotIn('文章标签', text)
         self.assertIn('## 后续\n保留正文', text)
-        self.assertEqual(result.backup_path.read_bytes(), original.encode('utf-8'))
+        self.assertEqual(list(self.root.iterdir()), [path])
         again = self.tool.process_file(path)
         self.assertEqual(again.status, 'unchanged', again.error)
-        self.assertEqual(len(list(self.root.glob('*.bak'))), 1)
+        self.assertEqual(list(self.root.iterdir()), [path])
 
     def test_missing_metadata_still_cleans_and_counts_only_blanks(self):
         path = self.write('甲\n\n　\n\n乙\n')
@@ -128,23 +128,24 @@ class MarkdownToolTests(unittest.TestCase):
         self.assertEqual(self.tool.process_file(self.write('a\n\nb', 'x.txt')).status, 'failed')
         self.assertFalse(list(self.root.glob('*.bak')))
 
-    def test_backup_failure_preserves_original(self):
+    def test_existing_backup_is_untouched_and_no_new_backup_is_created(self):
         path = self.write('一\n\n二\n')
-        original = path.read_bytes()
-        with patch.object(self.tool, 'create_backup', side_effect=PermissionError('模拟备份失败')):
-            result = self.tool.process_file(path)
-        self.assertEqual(result.status, 'failed')
-        self.assertEqual(path.read_bytes(), original)
+        old_backup = self.root / '笔记.md.old.bak'
+        old_backup.write_bytes(b'previous backup')
+        result = self.tool.process_file(path)
+        self.assertEqual(result.status, 'modified', result.error)
+        self.assertEqual(path.read_text(encoding='utf-8'), '一\n二\n')
+        self.assertEqual(old_backup.read_bytes(), b'previous backup')
+        self.assertEqual(set(self.root.iterdir()), {path, old_backup})
 
-    def test_replace_failure_keeps_original_and_backup_and_cleans_temp(self):
+    def test_replace_failure_keeps_original_and_cleans_temp_without_backup(self):
         path = self.write('一\n\n二\n')
         original = path.read_bytes()
         with patch.object(self.tool.os, 'replace', side_effect=PermissionError('模拟替换失败')):
             result = self.tool.process_file(path)
         self.assertEqual(result.status, 'failed')
         self.assertEqual(path.read_bytes(), original)
-        self.assertEqual(result.backup_path.read_bytes(), original)
-        self.assertEqual(sorted(p.suffix for p in self.root.iterdir()), ['.bak', '.md'])
+        self.assertEqual(list(self.root.iterdir()), [path])
 
     def test_crlf_bom_and_separator_are_preserved(self):
         path = self.write('\ufeff正文\r\n\r\n---\r\n\r\n甲\r\n\r\n乙\r\n')
@@ -191,18 +192,17 @@ class MarkdownToolTests(unittest.TestCase):
 
     def test_concurrent_edit_is_not_overwritten(self):
         path = self.write('甲\n\n乙\n')
-        original_backup = self.tool.create_backup
+        original_chmod = self.tool.os.chmod
 
-        def backup_and_edit(target, original):
-            backup = original_backup(target, original)
-            target.write_bytes('其他程序刚写入的内容'.encode('utf-8'))
-            return backup
+        def chmod_and_edit(target, mode):
+            original_chmod(target, mode)
+            path.write_bytes('其他程序刚写入的内容'.encode('utf-8'))
 
-        with patch.object(self.tool, 'create_backup', side_effect=backup_and_edit):
+        with patch.object(self.tool.os, 'chmod', side_effect=chmod_and_edit):
             result = self.tool.process_file(path)
         self.assertEqual(result.status, 'failed')
         self.assertEqual(path.read_text(encoding='utf-8'), '其他程序刚写入的内容')
-        self.assertEqual(result.backup_path.read_bytes(), '甲\n\n乙\n'.encode('utf-8'))
+        self.assertEqual(list(self.root.iterdir()), [path])
 
     def test_standalone_cli_without_original_scripts(self):
         standalone = self.root / SCRIPT.name
@@ -213,6 +213,7 @@ class MarkdownToolTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn('修改：1', completed.stdout)
         self.assertEqual(self.metadata(path.read_text(encoding='utf-8'))['aliases'], ['命令行别名'])
+        self.assertFalse(list(self.root.glob('*.bak')))
         failed = subprocess.run([sys.executable, str(standalone), str(self.root / 'missing.md')],
                                 capture_output=True, encoding='utf-8', timeout=20)
         self.assertEqual(failed.returncode, 1)
@@ -231,7 +232,7 @@ class MarkdownToolTests(unittest.TestCase):
             info.assert_called_once()
             root_factory.return_value.destroy.assert_called_once()
         self.assertEqual(path.read_text(encoding='utf-8'), '正文\n末尾\n')
-        self.assertEqual(len(list(self.root.glob('*.bak'))), 1)
+        self.assertEqual(list(self.root.iterdir()), [path])
 
     def test_detection_failure_does_not_ask_for_path_or_change_files(self):
         import tkinter

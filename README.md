@@ -8,7 +8,7 @@
 - 清理正文空行，保护 FrontMatter、代码块、HTML、表格及必要的相邻空行。
 - Windows 下无参数运行时，自动识别 Obsidian 当前文章，无需选择路径。
 - 支持命令行指定单个文件或文件夹；文件夹只处理当前层级 `.md` 文件。
-- 修改前自动在文章旁保存时间戳 `.bak` 备份；未变化的文件不写回、不备份。
+- 直接更新原 Markdown 文件，不生成 `.bak` 副本；未变化的文件不写回。
 - 无效 YAML、同名笔记识别歧义或写入期间的并发修改会阻止覆盖。
 
 ## 安装
@@ -46,7 +46,7 @@ python update_frontmatter_and_remove_blanklines.py "D:\笔记\待整理文件夹
 
 正常完成退出码为 `0`，识别或处理失败为 `1`。
 合并 YAML 时可能规范化排版并移除 YAML 注释；仅清理空行时保留原有 FrontMatter 排版。
-恢复时先关闭编辑器，将对应的 `原文件.md.时间戳.bak` 复制回原文件。
+写回采用原子替换，临时文件在操作结束后清理；以前生成的 `.bak` 文件保持原样。
 
 ## 文件
 
@@ -58,7 +58,7 @@ python update_frontmatter_and_remove_blanklines.py "D:\笔记\待整理文件夹
 | `remove_blanklines_backup.py` | 保留的旧版空行清理脚本 |
 | `使用说明.md` | 详细说明和原开发机器运行记录 |
 
-旧版脚本保持原有行为；建议使用推荐入口获得统一备份和错误保护。
+旧版脚本保持原有行为；建议使用推荐入口获得自动识别、直接更新和错误保护。
 
 ## 验证
 
@@ -66,7 +66,7 @@ python update_frontmatter_and_remove_blanklines.py "D:\笔记\待整理文件夹
 python -m unittest discover -v
 ```
 
-目前包含 26 项测试，覆盖迁移、空行保护、备份、并发修改、自动识别、多窗口、同名拒绝及 Windows 目录连接点。
+目前包含 26 项测试，覆盖迁移、空行保护、无备份直接更新、并发修改、自动识别、多窗口、同名拒绝及 Windows 目录连接点。
 测试不改写真实 Obsidian 笔记。
 
 ## 许可证

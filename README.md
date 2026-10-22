@@ -5,6 +5,7 @@
 ## 功能
 
 - 将正文中的“文章别名”“文章标签”等列表迁移到 FrontMatter 的 `aliases`、`tags`，自动去重。
+- 从正文末尾向前查找独立的 `Author: 作者名` 行，补充 FrontMatter 的 `author`，保留正文作者行；运行汇总显示实际补充作者的篇数。
 - 清理正文空行，保护 FrontMatter、代码块、HTML、表格及必要的相邻空行。
 - Windows 下无参数运行时，自动识别 Obsidian 当前文章，无需选择路径。
 - 支持命令行指定单个文件或文件夹；文件夹只处理当前层级 `.md` 文件。
@@ -48,6 +49,14 @@ python update_frontmatter_and_remove_blanklines.py "D:\笔记\待整理文件夹
 合并 YAML 时可能规范化排版并移除 YAML 注释；仅清理空行时保留原有 FrontMatter 排版。
 写回采用原子替换，临时文件在操作结束后清理；以前生成的 `.bak` 文件保持原样。
 
+作者提取兼容 `Author` 大小写、英文或中文冒号，并去除作者名首尾空白；有多条时取最后一条非空值。跳过代码块、HTML、表格、引用和列表中的作者示例。
+仅在 `author` 缺失、为 null 或为空白字符串时补充，已有非空作者保持原样；未找到作者时不新增字段。
+例如正文末尾的 `Author: 青临同学` 会补充为：
+
+```yaml
+author: 青临同学
+```
+
 ## 文件
 
 | 文件 | 用途 |
@@ -66,7 +75,7 @@ python update_frontmatter_and_remove_blanklines.py "D:\笔记\待整理文件夹
 python -m unittest discover -v
 ```
 
-目前包含 26 项测试，覆盖迁移、空行保护、无备份直接更新、并发修改、自动识别、多窗口、同名拒绝及 Windows 目录连接点。
+测试覆盖迁移、作者提取及已有值保护、空行保护、无备份直接更新、并发修改、自动识别、多窗口、同名拒绝及 Windows 目录连接点。
 测试不改写真实 Obsidian 笔记。
 
 ## 许可证

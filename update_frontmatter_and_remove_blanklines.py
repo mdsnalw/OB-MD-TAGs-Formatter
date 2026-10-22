@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""先迁移文章别名/标签到 FrontMatter，再清理 Markdown 空白行。
+"""先迁移文章别名/标签并补充作者到 FrontMatter，再清理 Markdown 空白行。
 
 双击：自动识别 Windows 上最近使用的 Obsidian 窗口当前笔记，处理后显示汇总。
 命令行：python update_frontmatter_and_remove_blanklines.py "文件或文件夹路径"
@@ -41,9 +41,10 @@ TAG_PATTERNS = [
     r'标签提取',
 ]
 LIST_ITEM = re.compile(r'^\s*(?:[-*]|\d+\.)\s+(\S.*)$')
+AUTHOR_LINE = re.compile(r'^ {0,3}Author\s*[:：]\s*(.*?)\s*$', re.IGNORECASE)
 FENCE = re.compile(r'^[ \t]*(?:>[ \t]*)*(`{3,}|~{3,})([^\r\n]*)$')
 HTML_TAG = re.compile(
-    r'<!--[\s\S]*?-->|<(?P<close>/)?(?P<tag>[A-Za-z][\w-]*)\b[^>]*>'
+    r'<!--[\s\S]*?-->|<(?P<close>/)?(?P<tag>[A-Za-z][\w-]*)(?=[\s/>])[^>]*>'
 )
 VOID_TAGS = set('area base br col embed hr img input link meta param source track wbr'.split())
 
@@ -56,6 +57,7 @@ class ProcessingResult:
     added_tags: int = 0
     removed_blank_lines: int = 0
     error: Optional[str] = None
+    added_authors: int = 0
 
 
 def split_frontmatter(content: str) -> Tuple[dict, str, str]:
@@ -207,7 +209,19 @@ def migrate_frontmatter(content: str) -> Tuple[str, int, int]:
             # 空标题不能成为删除正文的理由。
             index += 1
 
-    if not deleted:
+    # 只补充空作者；从末尾寻找最后一条非空的独立 Author 行，保留正文原行。
+    existing_author = data.get('author')
+    author = None
+    if existing_author is None or (isinstance(existing_author, str) and not existing_author.strip()):
+        for i in range(len(lines) - 1, -1, -1):
+            if protected[i]:
+                continue
+            match = AUTHOR_LINE.fullmatch(lines[i].rstrip('\r\n'))
+            if match and match.group(1).strip():
+                author = match.group(1).strip()
+                break
+
+    if not deleted and author is None:
         return content, 0, 0
     counts = {'aliases': 0, 'tags': 0}
     for key, items in extracted.items():
@@ -229,6 +243,9 @@ def migrate_frontmatter(content: str) -> Tuple[str, int, int]:
                 merged.append(value)
                 counts[key] += 1
         data[key] = merged
+
+    if author is not None:
+        data['author'] = author
 
     # 仅当数据变化时重新序列化；仅移动重复项时也能保留原 YAML 注释和排版。
     original_data, _, _ = split_frontmatter(content)
@@ -291,6 +308,8 @@ def process_file(file_path: Path) -> ProcessingResult:
         # utf-8-sig 同时读取带 BOM/不带 BOM 的文件，写回时保留原有 BOM。
         content = original.decode('utf-8-sig')
         migrated, added_aliases, added_tags = migrate_frontmatter(content)
+        added_authors = int(split_frontmatter(migrated)[0].get('author')
+                            != split_frontmatter(content)[0].get('author'))
         cleaned = remove_blanklines(migrated)
         removed = (sum(not line.strip() for line in migrated.splitlines())
                    - sum(not line.strip() for line in cleaned.splitlines()))
@@ -306,6 +325,7 @@ def process_file(file_path: Path) -> ProcessingResult:
         result.status = 'modified'
         result.added_aliases = added_aliases
         result.added_tags = added_tags
+        result.added_authors = added_authors
         result.removed_blank_lines = removed
     except Exception as exc:
         result.error = str(exc)
@@ -329,12 +349,13 @@ def process_path(path: Path) -> List[ProcessingResult]:
 
 def format_summary(results: List[ProcessingResult]) -> str:
     lines = [
-        '处理顺序：迁移标签和别名 → 清理空白行',
+        '处理顺序：迁移标签和别名、补充作者 → 清理空白行',
         f'文件共 {len(results)} 个；修改：{sum(r.status == "modified" for r in results)}；'
         f'未变化：{sum(r.status == "unchanged" for r in results)}；'
         f'失败：{sum(r.status == "failed" for r in results)}',
         f'实际新增别名：{sum(r.added_aliases for r in results)} 个',
         f'实际新增标签：{sum(r.added_tags for r in results)} 个',
+        f'实际补充作者：{sum(r.added_authors for r in results)} 篇',
         f'删除空白行：{sum(r.removed_blank_lines for r in results)} 行',
         '已直接更新原 Markdown 文件，不生成备份副本。',
     ]
@@ -403,6 +424,40 @@ def get_obsidian_window_titles() -> List[str]:
     return titles
 
 
+def get_folderbridge_local_mounts(vault: Path) -> List[Tuple[Path, bool]]:
+    """读取已启用 Folder Bridge 的本地挂载；虚拟目录不在 os.walk 中。"""
+    settings = vault / '.obsidian'
+    enabled_path = settings / 'community-plugins.json'
+    if not enabled_path.is_file():
+        return []
+    try:
+        enabled = json.loads(enabled_path.read_text(encoding='utf-8-sig'))
+        if 'folderbridge' not in enabled:
+            return []
+        # BRAT 安装目录可能与 manifest 中的插件 ID 不同。
+        for manifest in (settings / 'plugins').glob('*/manifest.json'):
+            metadata = json.loads(manifest.read_text(encoding='utf-8-sig'))
+            if metadata.get('id') != 'folderbridge':
+                continue
+            data = json.loads(manifest.with_name('data.json').read_text(encoding='utf-8-sig'))
+            mounts = []
+            for mount in data.get('mountPoints', []):
+                if not mount.get('enabled') or mount.get('mountType', 'vault') != 'vault':
+                    continue
+                if (mount.get('deviceId') and data.get('deviceId')
+                        and mount['deviceId'] != data['deviceId']
+                        and not data.get('allowForeignMounts', False)):
+                    continue
+                path = Path(mount['realPath'])
+                if not path.is_absolute():
+                    raise ValueError('本地挂载路径必须为绝对路径')
+                mounts.append((path.resolve(strict=True), bool(mount.get('readOnly'))))
+            return mounts
+        raise ValueError('已启用的 folderbridge 插件缺少 manifest.json')
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f'无法读取 Folder Bridge 本地挂载配置，已停止以避免误选文件：{exc}') from exc
+
+
 def detect_current_markdown(config_path: Optional[Path] = None,
                             window_titles: Optional[List[str]] = None) -> Path:
     """用实时窗口标题和仓库注册信息定位文件；有歧义时绝不猜测。"""
@@ -436,6 +491,7 @@ def detect_current_markdown(config_path: Optional[Path] = None,
         raise ValueError('无法从窗口标题唯一确定 Obsidian 仓库（可能存在同名仓库）')
     vault, note_name = matches[0]
     vault = vault.resolve(strict=True)
+    mounts = get_folderbridge_local_mounts(vault)
     candidates = []
     visited_directories = set()
 
@@ -446,24 +502,28 @@ def detect_current_markdown(config_path: Optional[Path] = None,
         # 部分目录不可读时不能认定笔记名唯一。
         raise ValueError(f'无法完整检查仓库，已停止以避免误选文件：{error}')
 
-    for directory, folders, filenames in os.walk(vault, onerror=scan_error, followlinks=False):
-        real_directory = Path(directory).resolve(strict=True)
-        if real_directory in visited_directories:
-            folders[:] = []
-            continue
-        visited_directories.add(real_directory)
-        # 支持 Obsidian 内通过目录连接点导入的文章，同时阻止连接点循环。
-        folders[:] = [name for name in folders if not name.startswith('.')
-                      and not (Path(directory) / name).is_symlink()]
-        for name in filenames:
-            path = Path(directory) / name
-            if path.suffix.lower() != '.md' or path.stem != note_name or path.is_symlink():
+    for root in [vault] + [path for path, _ in mounts]:
+        for directory, folders, filenames in os.walk(root, onerror=scan_error, followlinks=False):
+            real_directory = Path(directory).resolve(strict=True)
+            if real_directory in visited_directories:
+                folders[:] = []
                 continue
-            candidates.append(path)
+            visited_directories.add(real_directory)
+            # 同时检查物理仓库与虚拟挂载，保留连接点循环和同名保护。
+            folders[:] = [name for name in folders if not name.startswith('.')
+                          and not (Path(directory) / name).is_symlink()]
+            for name in filenames:
+                path = Path(directory) / name
+                if path.suffix.lower() != '.md' or path.stem != note_name or path.is_symlink():
+                    continue
+                candidates.append(path)
     if not candidates:
         raise ValueError('当前窗口没有可唯一定位的 Markdown 文章，请切换到已保存的 .md 文章后重试')
     if len(candidates) != 1:
         raise ValueError('仓库中存在同名 Markdown 文章，已停止以避免误处理；可用命令行指定完整路径')
+    if any(readonly and candidates[0].resolve().is_relative_to(path)
+           for path, readonly in mounts):
+        raise ValueError('当前 Markdown 文章位于 Folder Bridge 只读挂载，已停止以避免修改')
     return candidates[0]
 
 

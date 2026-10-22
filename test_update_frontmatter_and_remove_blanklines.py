@@ -104,6 +104,34 @@ class MarkdownToolTests(unittest.TestCase):
         self.assertIn('文章别名', output)
         self.assertIn('## 后续\n文字', output)
 
+    def test_angle_bracket_links_do_not_block_metadata_migration(self):
+        for link in ['[内部链接](<http://localhost:7026/unread/472>)',
+                     '[外部链接](<https://example.com/article>)',
+                     '<https://example.com/article>', '<mailto:user@example.com>',
+                     '<user@example.com>']:
+            with self.subTest(link=link):
+                original = (link + '\n\n## 📝文章别名：\n- 求职面试指南\n'
+                            '\n## 🎯文章标签：\n- 求职\n\n## 后续\n保留正文\n')
+                migrated, aliases, tags = self.tool.migrate_frontmatter(original)
+                self.assertEqual((aliases, tags), (1, 1))
+                self.assertEqual(self.metadata(migrated),
+                                 {'aliases': ['求职面试指南'], 'tags': ['求职']})
+                self.assertEqual(self.tool.split_frontmatter(migrated)[2],
+                                 link + '\n\n\n\n## 后续\n保留正文\n')
+
+    def test_real_html_still_protects_metadata_after_angle_bracket_link(self):
+        for region in ['<div>\n文章标签\n- 不提取\n</div>\n',
+                       '<custom-panel class="note">\n文章标签\n- 不提取\n</custom-panel>\n',
+                       '<div>\n文章标签\n- 不提取\n']:
+            with self.subTest(region=region):
+                original = ('[链接](<https://example.com>)\n'
+                            '文章别名\n- 求职面试指南\n' + region)
+                migrated, aliases, tags = self.tool.migrate_frontmatter(original)
+                self.assertEqual((aliases, tags), (1, 0))
+                self.assertEqual(self.metadata(migrated), {'aliases': ['求职面试指南']})
+                self.assertEqual(self.tool.split_frontmatter(migrated)[2],
+                                 '[链接](<https://example.com>)\n' + region)
+
     def test_frontmatter_is_untouched_when_only_cleaning(self):
         header = '---\n# 注释\ntitle: "标题"\n\ntext: |\n  第一行\n\n  第二行\n---\n'
         path = self.write(header + '\n正文\n\n\n结束\n')
@@ -275,6 +303,86 @@ class MarkdownToolTests(unittest.TestCase):
         config = self.obsidian_config([self.root])
         with self.assertRaisesRegex(ValueError, '同名'):
             self.tool.detect_current_markdown(config, [f'同名 - {self.root.name} - Obsidian 1.13.7'])
+
+    def folderbridge_config(self, vault, mounts):
+        plugins = vault / '.obsidian' / 'plugins'
+        plugin = plugins / 'Obsidian_FolderBridge'
+        plugin.mkdir(parents=True)
+        (plugin.parent.parent / 'community-plugins.json').write_text(
+            json.dumps(['folderbridge']), encoding='utf-8')
+        (plugin / 'manifest.json').write_text(
+            json.dumps({'id': 'folderbridge'}), encoding='utf-8')
+        (plugin / 'data.json').write_text(
+            json.dumps({'mountPoints': mounts}), encoding='utf-8')
+        return plugin
+
+    def test_detects_folderbridge_virtual_note_at_real_local_path(self):
+        vault = self.root / '主库'
+        external = self.root / '随记库'
+        external.mkdir()
+        note = external / '当前文章.md'
+        note.write_text('正文\n\n末尾\n', encoding='utf-8')
+        self.folderbridge_config(vault, [{
+            'virtualPath': '2-输出/Obsidian_DailyNotes', 'realPath': str(external),
+            'enabled': True, 'readOnly': False, 'mountType': 'vault',
+        }])
+        config = self.obsidian_config([vault])
+        actual = self.tool.detect_current_markdown(config, ['当前文章 - 主库 - Obsidian 1.13.7'])
+        self.assertEqual(actual, note.resolve())
+        self.assertEqual(note.read_text(encoding='utf-8'), '正文\n\n末尾\n')
+
+    def test_folderbridge_and_vault_duplicate_names_are_rejected(self):
+        vault = self.root / '主库'
+        external = self.root / '外部'
+        external.mkdir()
+        (external / '同名.md').write_text('外部', encoding='utf-8')
+        self.folderbridge_config(vault, [{
+            'virtualPath': '外部', 'realPath': str(external),
+            'enabled': True, 'mountType': 'vault',
+        }])
+        (vault / '同名.md').write_text('本地', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '同名'):
+            self.tool.detect_current_markdown(self.obsidian_config([vault]),
+                                            ['同名 - 主库 - Obsidian 1.13.7'])
+
+    def test_disabled_and_remote_folderbridge_mounts_are_not_scanned(self):
+        vault = self.root / '主库'
+        external = self.root / '外部'
+        external.mkdir()
+        (external / '文章.md').write_text('正文', encoding='utf-8')
+        self.folderbridge_config(vault, [
+            {'realPath': str(external), 'enabled': False, 'mountType': 'vault'},
+            {'realPath': str(external), 'enabled': True, 'mountType': 'webdav'},
+        ])
+        with self.assertRaises(ValueError):
+            self.tool.detect_current_markdown(self.obsidian_config([vault]),
+                                            ['文章 - 主库 - Obsidian 1.13.7'])
+
+    def test_disabled_folderbridge_plugin_is_not_scanned(self):
+        vault = self.root / '主库'
+        external = self.root / '外部'
+        external.mkdir()
+        (external / '文章.md').write_text('正文', encoding='utf-8')
+        self.folderbridge_config(vault, [
+            {'realPath': str(external), 'enabled': True, 'mountType': 'vault'},
+        ])
+        (vault / '.obsidian' / 'community-plugins.json').write_text('[]', encoding='utf-8')
+        with self.assertRaises(ValueError):
+            self.tool.detect_current_markdown(self.obsidian_config([vault]),
+                                            ['文章 - 主库 - Obsidian 1.13.7'])
+
+    def test_readonly_folderbridge_note_is_rejected(self):
+        vault = self.root / '主库'
+        external = self.root / '外部'
+        external.mkdir()
+        (external / '文章.md').write_text('正文', encoding='utf-8')
+        self.folderbridge_config(vault, [
+            {'realPath': str(external), 'enabled': True, 'readOnly': True,
+             'mountType': 'vault'},
+        ])
+        with self.assertRaisesRegex(ValueError, '只读'):
+            self.tool.detect_current_markdown(self.obsidian_config([vault]),
+                                            ['文章 - 主库 - Obsidian 1.13.7'])
 
     def test_uses_topmost_obsidian_window_instead_of_other_open_vault(self):
         first = self.root / '一库'
